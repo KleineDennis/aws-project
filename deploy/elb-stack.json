@@ -1,0 +1,244 @@
+// AutoStacker24 CloudFormation Template (https://github.com/AutoScout24/autostacker24/blob/master/readme.md)
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "bluewhale (tracking pixel) statistics service elb base stack",
+  "Parameters" : {
+    "AccountName" : {
+      "Description" : "The name of the account, e.g. 'as24prod'",
+      "Type" : "String",
+      "AllowedValues" : ["as24prod", "as24dev"]
+    },
+    "AccountSubDomain" : {
+      "Description" : "The subdomain of the account, e.g. 'aws'",
+      "Type" : "String"
+    },
+    "AvailabilityZones" : {
+      "Description" : "The list of AvailabilityZones for your Virtual Private Cloud (VPC)",
+      "Type": "List<AWS::EC2::AvailabilityZone::Name>"
+    },
+    "LoadbalancerSecurityGroup" : {
+      "Description" : "Security group for the loadbalancer",
+      "Type": "AWS::EC2::SecurityGroup::Id"
+    },
+    "RunbookUrl": {
+      "Description": "Location of runbooks, which holds prodecures for handling alerts",
+      "Type": "String",
+      "Default": "https://github.com/AutoScout24/tatsu-service/blob/master/runbooks"
+    },
+    "ServiceSecurityGroup" : {
+      "Description" : "Security group for the service instance",
+      "Type": "AWS::EC2::SecurityGroup::Id"
+    },
+    "ServiceSubnets" : {
+      "Description" : "Subnets where service instances should be launched.",
+      "Type": "List<AWS::EC2::Subnet::Id>"
+    },
+    "OpsGenieKey": {
+      "Description": "API key for OpsGenie integration",
+      "Type": "String",
+      "NoEcho": true
+    },
+    "SoftLimitMaximumNumberOfServers": {
+      "Description": "Maximum number of servers that should be used",
+      "Type": "Number"
+    }
+  },
+
+  "Resources" : {
+    "Loadbalancer": {
+      "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
+      "Properties": {
+        "AccessLoggingPolicy": {
+          "EmitInterval": 5,
+          "Enabled": "true",
+          "S3BucketName": "as24-elb-logs",
+          "S3BucketPrefix": "@AccountName/@AWS::StackName"
+        },
+        "CrossZone": "true",
+        "HealthCheck": {
+          "Target": "HTTP:9000/diagnostics/heartbeat",
+          "HealthyThreshold": "2",
+          "UnhealthyThreshold": "3",
+          "Interval": "7",
+          "Timeout": "5"
+        },
+        "LoadBalancerName": "@AWS::StackName-elb",
+        "Listeners": [
+          {
+            "InstancePort": "9000",
+            "InstanceProtocol": "HTTP",
+            "LoadBalancerPort": "443",
+            "Protocol": "HTTPS",
+            "SSLCertificateId": { "Fn::ImportValue": "global-certificate-stack-AccountWildcardCertificate" }
+          }
+        ],
+        "ConnectionDrainingPolicy": {
+          "Enabled": true,
+          "Timeout": 60
+        },
+        "SecurityGroups": [
+          "@LoadbalancerSecurityGroup"
+        ],
+        "Subnets": "@ServiceSubnets"
+      }
+    },
+    "ServiceSubDomainCOM": {
+      "Type": "AWS::Route53::RecordSet",
+      "Properties": {
+        "Type": "A",
+        "HostedZoneName": "@{AccountSubDomain}.autoscout24.com.",
+        "Name": "@AWS::StackName.@{AccountSubDomain}.autoscout24.com",
+        "AliasTarget": {
+          "HostedZoneId": {
+            "Fn::GetAtt": [
+              "Loadbalancer",
+              "CanonicalHostedZoneNameID"
+            ]
+          },
+          "DNSName": {
+            "Fn::GetAtt": [
+              "Loadbalancer",
+              "CanonicalHostedZoneName"
+            ]
+          }
+        }
+      }
+    },
+    "OpsGenieTopic4" : {
+      "Type" : "AWS::SNS::Topic",
+      "Properties" : {
+        "Subscription" : [
+          { "Endpoint" : "https://api.opsgenie.com/v1/json/cloudwatch?apiKey=@OpsGenieKey", "Protocol" : "https" }
+        ],
+        "TopicName" : "@AWS::StackName-opsgenie4"
+      }
+    },
+    "ELB5xxErrors": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "@AccountName - Alarm if there are too many 5xx errors (@RunbookUrl/README.md#Elb5xxErrors)",
+        "MetricName": "HTTPCode_Backend_5XX",
+        "Namespace": "AWS/ELB",
+        "Statistic": "Sum",
+        "Period": "300",
+        "EvaluationPeriods": "1",
+        "Threshold": "2",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "AlarmActions": ["@OpsGenieTopic4"],
+        "Dimensions": [
+          {
+            "Name": "LoadBalancerName",
+            "Value": "@Loadbalancer"
+          }
+        ]
+      }
+    },
+    "LatencyAlert": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "@AccountName - Alarm if the service latency is too long (@RunbookUrl/README.md#LatencyAlert)",
+        "MetricName": "Latency",
+        "Namespace": "AWS/ELB",
+        "Statistic": "Average",
+        "Period": "300",
+        "EvaluationPeriods": "1",
+        "Threshold": "20",
+        "ComparisonOperator": "GreaterThanThreshold",
+        "AlarmActions": ["@OpsGenieTopic4"],
+        "Dimensions": [
+          {
+            "Name": "LoadBalancerName",
+            "Value": "@Loadbalancer"
+          }
+        ]
+      }
+    },
+    "SpilloverCountAlert": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "@AccountName - Alarm if the ELB drops requests because the backend is overloaded (@RunbookUrl/README.md#LatencyAlert)",
+        "MetricName": "SpilloverCount",
+        "Namespace": "AWS/ELB",
+        "Statistic": "Sum",
+        "Period": "60",
+        "EvaluationPeriods": "1",
+        "Threshold": "1",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "AlarmActions": ["@OpsGenieTopic4"],
+        "Dimensions": [
+          {
+            "Name": "LoadBalancerName",
+            "Value": "@Loadbalancer"
+          }
+        ]
+      }
+    },
+    "SurgeQueueLengthAlert": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "@AccountName - Alarm if the ELB receives more requests than the backend can handle (@RunbookUrl/README.md#LatencyAlert)",
+        "MetricName": "SurgeQueueLength",
+        "Namespace": "AWS/ELB",
+        "Statistic": "Maximum",
+        "Period": "60",
+        "EvaluationPeriods": "1",
+        "Threshold": "1",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "AlarmActions": ["@OpsGenieTopic4"],
+        "Dimensions": [
+          {
+            "Name": "LoadBalancerName",
+            "Value": "@Loadbalancer"
+          }
+        ]
+      }
+    },
+    "TooManyInstancesAlert": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "@AccountName - Alarm if there are more instances than usual (@RunbookUrl/README.md#TooManyInstancesAlert) ",
+        "MetricName": "HealthyHostCount",
+        "Namespace": "AWS/ELB",
+        "Statistic": "Maximum",
+        "Period": "60",
+        "EvaluationPeriods": "7",
+        "Threshold": "@SoftLimitMaximumNumberOfServers",
+        "ComparisonOperator": "GreaterThanThreshold",
+        "AlarmActions": ["@OpsGenieTopic4"],
+        "Dimensions": [
+          {
+            "Name": "LoadBalancerName",
+            "Value": "@Loadbalancer"
+          }
+        ]
+      }
+    }
+  },
+
+  "Outputs" : {
+    "AccountName" : {
+      "Description" : "The name of the account, e.g. 'as24prod'",
+      "Value" : "@AccountName"
+    },
+    "AvailabilityZones" : {
+      "Description" : "The list of AvailabilityZones for your Virtual Private Cloud (VPC)",
+      "Value" : { "Fn::Join" : [ ",", "@AvailabilityZones" ] }
+    },
+    "OpsGenieTopic4" : {
+      "Description" : "The AWS SNS topic ARN for OpsGenie",
+      "Value" : "@OpsGenieTopic4"
+    },
+    "RunbookUrl" : {
+      "Description" : "Location of runbooks, which holds prodecures for handling alerts",
+      "Value" : "@RunbookUrl"
+    },
+    "ServiceSecurityGroup" : {
+      "Description" : "Security group for the service instance",
+      "Value" : "@ServiceSecurityGroup"
+    },
+    "ServiceSubnets" : {
+      "Description" : "Subnets where service instances should be launched.",
+      "Value" : { "Fn::Join" : [ ",", "@ServiceSubnets" ] }
+    }
+  }
+}

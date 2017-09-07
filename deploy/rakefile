@@ -1,0 +1,152 @@
+require 'rubygems'
+require 'bundler/setup'
+require 'autostacker24'
+require 'autocanary24'
+require 'base64'
+
+Aws.use_bundled_cert!
+
+require_relative 'smoke_test.rb'
+
+SERVICE = 'bluewhale'
+AWS_REGION = ENV['AWS_REGION']
+VERSION = ENV['VERSION'] || ENV['GO_PIPELINE_LABEL']
+SECRET = ENV['SECRET'] || ENV['GO_APPLICATION_SECRET']
+SANDBOX = ENV['SANDBOX'] || ENV['GO_JOB_NAME'].nil? && `whoami`.strip
+STACK = SANDBOX ? "#{SANDBOX}-#{SERVICE}" : SERVICE
+
+GLOBAL = ENV['GLOBAL'] || 'global'
+ELB_TEMPLATE = 'elb-stack.json'
+ALARM_PERIOD = 60
+TEMPLATE = 'bluewhale-stack.json'
+ENCRYPTED_OPSGENIE_KEY = 'CiA2G5kHM0w3MXrzwTqap0iZUeGHUUg/yKA/JIdBgRZmJRKsAQEBAgB4NhuZBzNMNzF688E6mqdImVHhh1FIP8igPySHQYEWZiUAAACDMIGABgkqhkiG9w0BBwagczBxAgEAMGwGCSqGSIb3DQEHATAeBglghkgBZQMEAS4wEQQM2i162Saisi+3pQ3YAgEQgD/Hq3c2wNRk0o/EoZWp3nkSCgWIdoO9yyjy/MHXDPZTlTWdVYQyCeur9z3Tl4a85tycKB/+w7UsoZXkShiz0OA='
+ENCRYPTED_JWT_SECRET = 'AQECAHg2G5kHM0w3MXrzwTqap0iZUeGHUUg/yKA/JIdBgRZmJQAAAH4wfAYJKoZIhvcNAQcGoG8wbQIBADBoBgkqhkiG9w0BBwEwHgYJYIZIAWUDBAEuMBEEDBB22K2eFHXv6y1qIQIBEIA7qJLnLRqehxORh2TbS6fxjl4K427I7dGmFqKu5cz046oOAxxgjp2UTy7wokLFf3JoYOJz4rhT/4NMVNw='
+ENCRYPTED_BABELFISH_JWT_SECRET = 'AQECAHg2G5kHM0w3MXrzwTqap0iZUeGHUUg/yKA/JIdBgRZmJQAAAH4wfAYJKoZIhvcNAQcGoG8wbQIBADBoBgkqhkiG9w0BBwEwHgYJYIZIAWUDBAEuMBEEDAIqTtgMT0nOEWVRPAIBEIA7LvZ2jhMgM+VsEVf3pqW/WVTUcLLmRI0hwbvG7aIU8GI+YHKMOEINlbTcqhOYZTpbpLT+H30RWPk6D+s='
+
+
+desc 'create or update stack'
+task :create_or_update do
+
+
+
+  prod = Stacker.get_stack_output(GLOBAL)[:AccountName] =~ /as24prod/i
+
+  # set instance numbers and allow for deployment
+  minimum_servers = prod ? 3 : 1
+  maximum_servers = prod ? 5 : 2
+  servers_low_alarm_limit = (minimum_servers - 1)
+
+  fail('VERSION missing') unless VERSION #TODO: determine latest green version for sandboxed deploy
+  secret = SECRET
+  if prod
+    fail('SECRET missing') unless secret
+  else
+    secret = "DEV_ENV_SECRET" unless secret
+  end
+
+  elb_parameters = {
+      RunbookUrl: "https://github.com/AutoScout24/#{SERVICE}/blob/master/runbooks",
+      SoftLimitMaximumNumberOfServers: maximum_servers,
+      OpsGenieKey: kms_decrypt_credentials(ENCRYPTED_OPSGENIE_KEY),
+  }
+
+  Stacker.create_or_update_stack(STACK, ELB_TEMPLATE, elb_parameters, GLOBAL, tags)
+
+  parameters = {
+      MinimumNumberOfServers: minimum_servers,
+      MaximumNumberOfServers: maximum_servers,
+      MinimumNumberOfServersAlarmLimit: servers_low_alarm_limit,
+
+
+      AmiId: ENV['AMI_ID'] || File.read('ami.txt'), # TODO: get newest ami locally
+      AuthRole: ENV['AUTH_ROLE'] || SERVICE,
+      InstanceType: prod ? 'm4.large' : 't2.micro',
+      Service: SERVICE,
+      Secret: secret,
+      Version: VERSION,
+      ParentStackName: STACK,
+      JwtSecret: kms_decrypt_credentials(ENCRYPTED_JWT_SECRET),
+      ClassifiedBabelfishJwtSecret: kms_decrypt_credentials(ENCRYPTED_BABELFISH_JWT_SECRET)
+  }
+  ac = AutoCanary24::Client.new
+  ac.deploy_stack(STACK, TEMPLATE, parameters, tags)
+
+end
+
+desc 'delete stack'
+task :delete do
+  Stacker.delete_stack("#{STACK}-B") unless Stacker.find_stack("#{STACK}-B").nil?
+  Stacker.delete_stack("#{STACK}-G") unless Stacker.find_stack("#{STACK}-G").nil?
+  Stacker.delete_stack(STACK) unless Stacker.find_stack(STACK).nil?
+end
+
+desc 'run integration tests'
+task :test do
+  subdomain = Stacker.get_stack_output(GLOBAL)[:AccountSubDomain]
+  run_smoke_tests("https://#{STACK}.#{subdomain}.autoscout24.com")
+end
+
+desc 'deploy service'
+task :deploy => [:create_or_update, :test] do
+end
+
+desc 'validate template'
+task :validate do
+  Stacker.validate_template(ELB_TEMPLATE)
+  Stacker.validate_template(TEMPLATE)
+end
+
+desc 'dump template'
+task :dump do
+  puts 'Base Template:'
+  puts JSON.pretty_generate(JSON(Stacker.template_body(ELB_TEMPLATE)))
+  puts ''
+  puts 'Service Template:'
+  puts JSON.pretty_generate(JSON(Stacker.template_body(TEMPLATE)))
+end
+
+desc 'assembles the artifact'
+task :assemble do
+  Dir.chdir('..') do
+    system "GO_PIPELINE_LABEL=#{VERSION} ./build.sh" or exit 1
+  end
+end
+
+desc "publish"
+task :publish do
+  Dir.chdir('..') do
+    system "GO_PIPELINE_LABEL=#{VERSION} AWS_REGION=#{AWS_REGION} ./publish.sh" or exit 1
+  end
+end
+
+task :default do
+  puts
+  puts 'Use one of the available tasks:'
+  puts "Current stack is #{STACK}\n"
+  system 'rake -T'
+end
+
+def kms_decrypt_credentials(cipher_text)
+  kms = Aws::KMS::Client.new
+  kms.decrypt({ciphertext_blob: Base64.decode64(cipher_text)}).plaintext
+end
+
+def tags
+  tags_from_metadata_file("../metadata.yaml")
+end
+
+def tags_from_metadata_file(path, *additional_tags)
+  allowed_chars = /^[a-zA-Z0-9\+-=\._:\/@]*$/
+  data = YAML.load_file(path)
+  ([:service, :usecase, :team, :segment, :repository_url] + additional_tags)
+      .map { |k| [k, data[k.to_s]] }
+      .select { |k,v|
+    if allowed_chars.match(k) && allowed_chars.match(v)
+      true
+    else
+      warn "WARNING: CFN Tag (#{ k }) => (#{ v }) has forbidden characters"
+      false
+    end
+  }.map { |k,v| { key: k, value: v.to_s } }
+end
+

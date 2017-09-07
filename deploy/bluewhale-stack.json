@@ -1,0 +1,322 @@
+// AutoStacker24 CloudFormation Template (https://github.com/AutoScout24/autostacker24/blob/master/readme.md)
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+  "Description" : "bluewhale (tracking pixel) statistics service",
+
+  "Parameters" : {
+
+    "AccountName" : {
+      "Description" : "The name of the account, e.g. 'as24prod'",
+      "Type" : "String",
+      "AllowedValues" : ["as24prod", "as24dev"]
+    },
+    "AmiId" : {
+      "Description" : "Id of existing AMI for service instances",
+      "Type" : "AWS::EC2::Image::Id"
+    },
+    "AuthRole": {
+      "Description": "IAM role used to S3 authentication",
+      "Type": "String"
+    },
+    "AvailabilityZones" : {
+      "Description" : "The list of AvailabilityZones for your Virtual Private Cloud (VPC)",
+      "Type": "List<AWS::EC2::AvailabilityZone::Name>"
+    },
+    "InstanceType": {
+      "Description": "Instance type of service application servers",
+      "Type": "String"
+    },
+    "MaximumNumberOfServers": {
+      "Description": "Maximum number of servers to have in the autoscaling group",
+      "Type": "Number"
+    },
+    "MinimumNumberOfServers": {
+      "Description": "Minimum number of servers to have in the autoscaling group",
+      "Type": "Number"
+    },
+    "MinimumNumberOfServersAlarmLimit" : {
+      "Description": "The lower limit of servers to trigger alarm by",
+      "Type": "Number"
+    },
+    "RunbookUrl": {
+      "Description": "Location of runbooks, which holds prodecures for handling alerts",
+      "Type": "String",
+      "Default": "https://github.com/AutoScout24/tarcking-pixel-statistics/blob/master/runbooks"
+    },
+    "Service": {
+      "Description": "Name of the service.",
+      "Type": "String"
+    },
+    "Secret": {
+      "Description": "The Play application secret to use.",
+      "Type": "String"
+    },
+    "ServiceSecurityGroup" : {
+      "Description" : "Security group for the service instance",
+      "Type": "AWS::EC2::SecurityGroup::Id"
+    },
+    "ServiceSubnets" : {
+      "Description" : "Subnets where service instances should be launched.",
+      "Type": "List<AWS::EC2::Subnet::Id>"
+    },
+    "Version" : {
+      "Description" : "Version of the service to launch.",
+      "Type" : "String"
+    },
+    "ParentStackName" : {
+      "Description" : "The name of the parent ELB stack.",
+      "Type" : "String"
+    },
+    "OpsGenieTopic4" : {
+      "Description" : "The AWS SNS topic ARN for OpsGenie",
+      "Type" : "String"
+    },
+    "JwtSecret" : {
+      "Description" : "Secret used to verify signature in JWT token",
+      "Type" : "String",
+      "NoEcho": "true"
+    },
+    "ClassifiedBabelfishJwtSecret" : {
+      "Type" : "String",
+      "NoEcho": "true"
+    }
+  },
+
+  "Resources" : {
+    "AutoScalingGroup" : {
+      "Type" : "AWS::AutoScaling::AutoScalingGroup",
+      "Properties" : {
+        "AvailabilityZones" : "@AvailabilityZones",
+        "VPCZoneIdentifier" : "@ServiceSubnets",
+        "LaunchConfigurationName" : "@LaunchConfig",
+        "MinSize": "@MinimumNumberOfServers",
+        "MaxSize": "@MaximumNumberOfServers",
+        "HealthCheckGracePeriod" : "600",
+        "HealthCheckType" : "ELB",
+        "MetricsCollection": [{
+          "Granularity": "1Minute",
+          "Metrics": ["GroupInServiceInstances"]
+        }],
+        "NotificationConfigurations": [{
+          "TopicARN": "@OpsGenieTopic4",
+          "NotificationTypes": ["autoscaling:EC2_INSTANCE_LAUNCH_ERROR", "autoscaling:EC2_INSTANCE_TERMINATE_ERROR"]
+        }],
+        "Tags" : [{"Key" : "Name", "Value" : "@Service", "PropagateAtLaunch" : "true" }]
+      },
+      "CreationPolicy" : {
+
+      },
+      "UpdatePolicy": {
+        "AutoScalingRollingUpdate": {
+          "MinInstancesInService": "@MinimumNumberOfServers",
+          "MaxBatchSize": "2",
+          "PauseTime" : "PT10M",
+          "SuspendProcesses" : [ "AlarmNotification" ],
+          "WaitOnResourceSignals": "true"
+        }
+      }
+    },
+    "LaunchConfig" : {
+      "Type" : "AWS::AutoScaling::LaunchConfiguration",
+      "Metadata" : {
+        // This can be used to download artifacts directly from S3 without having to use the cli
+        // You may use the "sources" stanca from cfn-init to do so
+        "AWS::CloudFormation::Authentication": {
+          "S3AccessCreds" : {
+            "type": "s3",
+            "buckets": [ "as24-artifacts-@AWS::Region" ],
+            "roleName": "@AuthRole"
+          }
+        },
+        "AWS::CloudFormation::Init" : {
+          "configSets" : {
+            "service_configuration": ["user_config", "fluentd_config", "service_setup" ]
+          },
+          "user_config" : {
+            "commands": {
+              // Create application user with bash shell
+              "add_app_user": {
+                "command": "useradd -U -d /@Service-@Version @Service -s /bin/bash"
+              }
+            }
+          },
+          // We need to start fluentd in this step and pass the correct stack name
+          "fluentd_config": {
+            "files": {
+              // add fluentd config for application log.
+              "/opt/fluentd/conf.d/service.conf": {
+                "content": { "Fn::Join": ["\n", [
+                  "<source>",
+                  "  type tail",
+                  "  format multiline",
+                  "  format_firstline /^\\d{4}-\\d{1,2}-\\d{1,2} \\d{1,2}:\\d{1,2}:\\d{1,2},\\d{1,3}.*/",
+                  "  format1 /^(?<time>\\d{4}-\\d{1,2}-\\d{1,2} \\d{1,2}:\\d{1,2}:\\d{1,2},\\d{1,3})\\s*(?<message>.*)/",
+                  "  time_format %Y-%m-%d %H:%M:%S,%L",
+                  "  path /@Service-@Version/logs/application.log",
+                  "  refresh_interval 5",
+                  "  pos_file /tmp/@Service-application-log.POS",
+                  "  tag system-logs.application",
+                  "  read_from_head true",
+                  "</source>"
+                ]]}
+              }
+            },
+            "commands": {
+              // Start/reload fluentd
+              "start_fluentd": {
+                "command": { "Fn::Join": ["\n", [
+                  "if /sbin/initctl status fluentd | grep -q 'stop/waiting'; then",
+                  "  /sbin/initctl start fluentd STACKNAME=\"$STACKNAME\"",
+                  "else",
+                  "  /sbin/initctl reload fluentd STACKNAME=\"$STACKNAME\"",
+                  "fi"
+                ]]},
+                "env": { "STACKNAME": "@AWS::StackName" }
+              }
+            }
+          },
+          "service_setup": {
+            // This line does the following:
+            // 1. Authenticate with CloudFront/S3 using the instance's IAM role
+            // 2. Download the artifact to the root directory using the URL provided
+            // 3. Extracts the artifact
+            //
+            // There is no more need for moving/extracting artifacts yourself
+            "sources": {
+              "/": "https://s3-@{AWS::Region}.amazonaws.com/as24-artifacts-@AWS::Region/@Service/@Service-@{Version}.tgz"
+            },
+            "commands": {
+              "a_chmod": {
+                // Change ownership to the right user (application user)
+                "command": "chown -R @Service.@Service /@Service-@Version"
+              },
+              // 1. Enter the service directory
+              // 2. Start the service in the background
+              "b_start": {
+                "command": "runuser -l @Service -c \"JWT_SECRET='@JwtSecret' CLASSIFIED_BABELFISH_JWT_SECRET='@ClassifiedBabelfishJwtSecret' nohup bin/@Service -Dplay.crypto.secret='@Secret' -Dconfig.resource=@{AccountName}.conf -Dlogger.resource=@AccountName-logger.xml -Dstack-name=@AWS::StackName > cfn_init_b_start.log 2>&1 &\"",
+                "cwd": "/@Service-@Version"
+              },
+              "c_smoketest": {
+                "command": "wget --retry-connrefused --tries=50 --timeout=5 --wait=1 http://localhost:9000/diagnostics/heartbeat"
+              }
+            }
+          }
+        }
+      },
+      "Properties" : {
+        "ImageId" : "@AmiId",
+        "InstanceType" : "@InstanceType",
+        "SecurityGroups" : ["@ServiceSecurityGroup"],
+        "IamInstanceProfile" : "@AuthRole",
+        "UserData": { "Fn::Base64": { "Fn::Join": [ "", [
+          "#!/bin/bash\n",
+
+          // This is needed for cfn-init to reinitialize the instances with the new version on updates
+          "VERSION=\"@Version\"\n",
+
+          "/opt/aws/bin/cfn-init -v ",
+          "  --stack @AWS::StackName " ,
+          "  --resource LaunchConfig ",
+          "  --configsets service_configuration ",
+          "  --region @AWS::Region\n",
+
+          "/opt/aws/bin/cfn-signal -e $? ",
+          " --stack @AWS::StackName",
+          " --region @AWS::Region",
+          " --resource AutoScalingGroup\n"
+        ]]}}}
+    },
+    "WebServerScaleUpPolicy" : {
+      "Type" : "AWS::AutoScaling::ScalingPolicy",
+      "Properties" : {
+        "AdjustmentType" : "ChangeInCapacity",
+        "AutoScalingGroupName" : "@AutoScalingGroup",
+        "Cooldown" : "600",
+        "ScalingAdjustment" : "1"
+      }
+    },
+    "WebServerScaleDownPolicy" : {
+      "Type" : "AWS::AutoScaling::ScalingPolicy",
+      "Properties" : {
+        "AdjustmentType" : "ChangeInCapacity",
+        "AutoScalingGroupName" : "@AutoScalingGroup",
+        "Cooldown" : "900",
+        "ScalingAdjustment" : "-1"
+      }
+    },
+    "CPUAlarmHigh": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "Scale-up if CPU > 50% for 5 minutes",
+        "MetricName": "CPUUtilization",
+        "Namespace": "AWS/EC2",
+        "Statistic": "Average",
+        "Period": "300",
+        "EvaluationPeriods": "1",
+        "Threshold": "50",
+        "AlarmActions": ["@WebServerScaleUpPolicy"],
+        "Dimensions": [
+          {
+            "Name": "AutoScalingGroupName",
+            "Value": "@AutoScalingGroup"
+          }
+        ],
+        "ComparisonOperator": "GreaterThanThreshold"
+      }
+    },
+    "CPUAlarmLow": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "Scale-down if CPU < 20% for 10 minutes",
+        "MetricName": "CPUUtilization",
+        "Namespace": "AWS/EC2",
+        "Statistic": "Average",
+        "Period": "600",
+        "EvaluationPeriods": "3",
+        "Threshold": "20",
+        "AlarmActions": ["@WebServerScaleDownPolicy"],
+        "Dimensions": [
+          {
+            "Name": "AutoScalingGroupName",
+            "Value": "@AutoScalingGroup"
+          }
+        ],
+        "ComparisonOperator": "LessThanThreshold"
+      }
+    },
+    "NotEnoughInstancesAlert": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "@AccountName - Alarm if there are not enough instances (@RunbookUrl/README.md#NotEnoughInstancesAlert)",
+        "MetricName": "GroupInServiceInstances",
+        "Namespace": "AWS/AutoScaling",
+        "Statistic": "Minimum",
+        "Period": "60",
+        "EvaluationPeriods": "3",
+        "Threshold": "@MinimumNumberOfServersAlarmLimit",
+        "ComparisonOperator": "LessThanThreshold",
+        "AlarmActions": ["@OpsGenieTopic4"],
+        "Dimensions": [
+          {
+            "Name": "AutoScalingGroupName",
+            "Value": "@AutoScalingGroup"
+          }
+        ]
+      }
+    },
+    "UnhandledExceptionsAlert": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "@AccountName - Alarm if there are unhandled exceptions caught by eventpublisher24  (@RunbookUrl/README.md#UnhandledExceptionsAlert)",
+        "MetricName": "exception-not-handled",
+        "Namespace": "@Service",
+        "Statistic": "Sum",
+        "Period": "300",
+        "EvaluationPeriods": "1",
+        "Threshold": "1",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "AlarmActions": ["@OpsGenieTopic4"]
+      }
+    }
+  }
+}

@@ -1,0 +1,4 @@
+[repositories]
+  local
+  as24-ivy-proxy-releases: https://nexus.tools.autoscout24.com/nexus/content/groups/ivy-releases/, [organization]/[module]/(scala_[scalaVersion]/)(sbt_[sbtVersion]/)[revision]/[type]s/[artifact](-[classifier]).[ext]
+  as24-maven-proxy-releases: https://nexus.tools.autoscout24.com/nexus/content/groups/public/

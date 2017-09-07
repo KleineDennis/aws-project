@@ -1,0 +1,24 @@
+# Routes
+# This file defines all application routes (Higher priority routes first)
+# ~~~~
+
+# Home page
+
+GET         /api/classifieds/:classifiedGuid/livedata                @bluewhale.api.livedata.LiveDataController.getClassifiedLiveData(classifiedGuid: String)
+
+GET         /api/classifieds/:classifiedGuid/counts                  @bluewhale.api.counts.ArticleCountsController.getClassifiedCounts(classifiedGuid: String)
+GET         /api/classifieds/:classifiedGuid/states                  @bluewhale.api.classifiedstate.ClassifiedStateController.getClassifiedStates(classifiedGuid: String)
+
+GET         /api/customers/:customerId/counts                        @bluewhale.api.counts.ArticleCountsController.getCustomerCounts(customerId: Long)
+GET         /api/customers/:customerId/all-classifieds-counts        @bluewhale.api.counts.ArticleCountsController.getAllCustomersClassifiedsCounts(customerId: Long)
+
+GET         /html/viewx                                              @bluewhale.html.HtmlController.viewx
+
+POST        /api/statistic/events                                    @bluewhale.statsreceiver.StatisticsReceiverController.statisticEvent
+
+# Map static resources from the /public folder to the /assets URL path
+GET         /assets/*file                                            controllers.Assets.versioned(path="/public", file: Asset)
+
+GET         /diagnostics/heartbeat                                   @bluewhale.monitoring.DiagnosticsController.heartbeatCheck
+GET         /diagnostics/version                                     @bluewhale.monitoring.DiagnosticsController.version
+GET         /diagnostics/exception                                   @bluewhale.monitoring.DiagnosticsController.exceptionCheck

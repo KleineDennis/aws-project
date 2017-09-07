@@ -1,0 +1,189 @@
+# this is an example of the Uber API
+# as a demonstration of an API spec in YAML
+swagger: '2.0'
+info:
+  title: Autoscout24 API
+  description: API
+  version: "1.0.0"
+# the domain of the service
+host: bluewhale.a.autoscout24.com
+# array of all schemes that your API supports
+schemes:
+  - https
+# will be prefixed to all paths
+basePath: /api
+produces:
+  - application/json
+securityDefinitions:
+  Bearer:
+    type: apiKey
+    name: Authorization
+    in:   header
+
+paths:
+  /statistics/events/classifiedevents:
+    post:
+      tags:
+        - Classified Event
+      consumes:
+        - application/json
+      produces:
+        - application/json
+      parameters:
+        - in: body
+          name: classifiedevent
+          description: Classified Event to Add
+          required: true
+          schema: 
+            $ref: "#/definitions/ClassifiedEventsType"
+      responses:
+        200:
+          description: Classified Event succesfully created.
+  /statistics/events/customerevents:
+    post:
+      tags:
+        - Customer Event
+      consumes:
+        - application/json
+      produces:
+        - application/jso  
+      parameters:
+        - in: body
+          name: customerevent
+          description: Customer Event to Add
+          required: true
+          schema:
+            $ref: "#/definitions/CustomerEventType"
+      responses:
+        200:
+          description: Classified Event succesfully created.
+
+  /customers/{customerId}/count:
+    get:
+      summary: Real Time article / customer statistics from Bluewhale
+      description: |
+        The endpoint api/customers returns statistics for a given customer in realtime. The endpoint is queried with customer ID and dates and returns a JSON object containing all numbers recorded ordered by date. If end date is today, the statistics are the latest (RealTime).
+      security:
+      - Bearer: []
+      parameters:
+        - name: customerId
+          in: path
+          description: CustomerId
+          required: true
+          type: number
+        - name: startDate
+          in: query
+          description: start date
+          required: true
+          type: string
+          format: dateTime
+        - name: endDate
+          in: query
+          description: end date
+          required: true
+          type: string
+          format: dateTime
+      tags: 
+      - Customers
+      responses:
+        200:
+          description: OK
+          schema:
+            type: array
+            items:
+              $ref: '#/definitions/Counts'
+        default:
+          description: Unexpected Error
+          schema:
+            $ref: '#/definitions/Error'
+
+  /classifieds/{classifiedGuid}/count:
+    get:
+      summary: Real Time article / classified statistics from Bluewhale
+      operationId: counts
+      description: |
+        The endpoint api/classifieds returns statistics for a given article in realtime. The endpoint is queried with classified GUID and dates and returns a JSON object containing all numbers recorded ordered by date. If end date is today, the statistics are the latest (RealTime).
+      security:
+      - Bearer: []
+      parameters:
+        - name: classifiedGuid
+          in: path
+          description: classifiedGuid
+          required: true
+          type: string
+        - name: startDate
+          in: query
+          description: start date
+          required: true
+          type: string
+          format: dateTime
+        - name: endDate
+          in: query
+          description: end date
+          required: true
+          type: string
+          format: dateTime
+      tags:
+        - Classifieds
+      responses:
+        200:
+          description: OK
+          schema:
+            type: array
+            items:
+              $ref: '#/definitions/Counts'
+        default:
+          description: Unexpected Error
+          schema:
+            $ref: '#/definitions/Error'
+
+definitions:
+  Counts:
+    type: object
+    properties:
+      eventType:
+        type: string
+        description: eventType
+      count:
+        type: number
+        description: count
+  Error:      
+    properties:
+      code:
+        type: integer
+        format: int32
+      message:
+        type: string
+      fields:
+        type: string
+  ClassifiedEventsType:
+    type: object
+    properties:  
+      eventType:
+        type: string
+        enum:
+          - DetailPageView
+          - DetailViewMobile
+          - ListPageView
+          - ListViewMobile
+          - AddedToWatchlist
+          - EmailSent
+          - CallClick
+          - PrintDetailPage
+      classifiedGuid:
+        type: string
+      timestamp:
+        type: integer
+        format: int32
+  CustomerEventType:
+    type: object
+    properties:  
+      eventType:
+        type: string
+        enum:
+          - EmailSent
+      customerId:
+        type: string
+      timestamp:
+        type: integer
+        format: int32
